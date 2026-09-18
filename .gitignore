@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.local
+
+# Data & experiment output
+data/raw/
+data/cache/
+runs/
+*.sqlite3
+*.db
+
+# Node / frontend
+node_modules/
+.next/
+out/
+dist/
+
+# OS
+.DS_Store

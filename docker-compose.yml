@@ -1,0 +1,28 @@
+# Backing services for local development.
+#   docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: geolytics
+      POSTGRES_PASSWORD: geolytics
+      POSTGRES_DB: geolytics
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geolytics"]
+      interval: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    ports: ["6333:6333", "6334:6334"]
+    volumes: ["qdrantdata:/qdrant/storage"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+  qdrantdata:
