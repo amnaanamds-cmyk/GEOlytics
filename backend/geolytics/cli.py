@@ -29,12 +29,33 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--metric", default="ndcg@10")
     p_exp.add_argument("--baseline", default="fixed+dense")
     p_exp.add_argument("--out", type=Path, default=Path("runs/experiment.json"))
+    p_exp.add_argument(
+        "--persist-as",
+        default=None,
+        metavar="NAME",
+        help="also store runs in the database under this experiment name",
+    )
+    p_exp.add_argument(
+        "--generator",
+        choices=("auto", "llm", "heuristic"),
+        default="auto",
+        help="query generator; 'auto' falls back to templates when no LLM is configured",
+    )
 
     p_eq = sub.add_parser(
         "check-metrics",
         help="test whether cosine/dot/euclidean are separate conditions for this embedder",
     )
     p_eq.add_argument("--n-passages", type=int, default=200)
+
+    p_cal = sub.add_parser(
+        "calibrate",
+        help="fit GEO signal weights against visibility in the simulated engine",
+    )
+    p_cal.add_argument("url")
+    p_cal.add_argument("--max-pages", type=int, default=30)
+    p_cal.add_argument("--chunker", default="sentence")
+    p_cal.add_argument("--out", type=Path, default=Path("runs/weights.json"))
 
     sub.add_parser("init-db", help="create database tables")
 
@@ -44,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         return _audit(args)
     if args.command == "experiment":
         return _experiment(args)
+    if args.command == "calibrate":
+        return _calibrate(args)
     if args.command == "check-metrics":
         return _check_metrics(args)
     if args.command == "init-db":
@@ -95,9 +118,77 @@ def _experiment(args: argparse.Namespace) -> int:
         metric=args.metric,
         baseline=args.baseline,
         out_path=args.out,
+        generator=args.generator,
+        persist_as=args.persist_as,
     )
     print(report)
     return 0
+
+
+def _calibrate(args: argparse.Namespace) -> int:
+    from geolytics.chunking.registry import build_chunker
+    from geolytics.config import get_settings
+    from geolytics.crawl.crawler import Crawler
+    from geolytics.embedding.registry import build_embedder
+    from geolytics.experiments.chunking_grid import build_query_set
+    from geolytics.geo.calibration import as_dict, calibrate_weights
+    from geolytics.geo.engine import SimulatedGenerativeEngine
+    from geolytics.index.memory import InMemoryVectorStore
+    from geolytics.llm import build_llm
+    from geolytics.retrieval.dense import DenseRetriever
+
+    settings = get_settings()
+
+    # Calibration regresses signals against how much of a *generated answer*
+    # each page won. With no model there are no answers, so the target would be
+    # uniformly zero -- say so before spending a crawl on it.
+    if settings.llm_backend == "none":
+        print(
+            "calibration needs a generative model: it measures visibility in "
+            "generated answers, and no LLM backend is configured.\n"
+            "Set GEOLYTICS_LLM_BACKEND=ollama (and GEOLYTICS_OLLAMA_MODEL) first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    embedder = build_embedder(settings)
+
+    with Crawler(settings=settings) as crawler:
+        results = crawler.crawl(args.url, max_pages=args.max_pages)
+        print(crawler.stats.summary(), file=sys.stderr)
+    if not results:
+        print(f"no pages crawled from {args.url}", file=sys.stderr)
+        return 1
+
+    documents = [r.document for r in results]
+    html_by_doc = {r.document.doc_id: r.html for r in results}
+
+    chunker = build_chunker(args.chunker, embedder=embedder)
+    chunks_by_doc = {d.doc_id: chunker.chunk(d) for d in documents}
+    chunks = [c for group in chunks_by_doc.values() for c in group]
+    if not chunks:
+        print("extraction produced no chunks", file=sys.stderr)
+        return 1
+
+    store = InMemoryVectorStore()
+    store.create_collection("calibrate", dim=embedder.dim)
+    store.upsert("calibrate", chunks, embedder.embed([c.text for c in chunks]))
+
+    query_set, generation = build_query_set(documents, settings)
+    print(generation.summary(), file=sys.stderr)
+
+    engine = SimulatedGenerativeEngine(
+        DenseRetriever(store, embedder, "calibrate"), build_llm(settings), top_k=5
+    )
+    report = calibrate_weights(
+        documents, chunks_by_doc, engine, [q.text for q in query_set], html_by_doc
+    )
+
+    print(report.summary())
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(as_dict(report), indent=2), encoding="utf-8")
+    print(f"\nwritten to {args.out}")
+    return 0 if report.usable else 1
 
 
 def _check_metrics(args: argparse.Namespace) -> int:

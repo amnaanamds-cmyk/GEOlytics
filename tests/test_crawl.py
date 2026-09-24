@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import SAMPLE_HTML
 from geolytics.crawl.crawler import _canonical, _links
 from geolytics.crawl.extract import extract_document, extract_sections
+from sample_data import SAMPLE_HTML
 
 
 class TestExtraction:

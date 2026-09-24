@@ -1,5 +1,10 @@
 """GEO: measurable content signals, visibility simulation, and scoring."""
 
+from geolytics.geo.calibration import (
+    CalibrationReport,
+    calibrate_weights,
+    measure_visibility,
+)
 from geolytics.geo.engine import GeneratedAnswer, SimulatedGenerativeEngine, parse_citations
 from geolytics.geo.scoring import (
     GEOScore,
@@ -13,6 +18,9 @@ from geolytics.geo.visibility import AnswerSentence, ImpressionMetrics, citation
 
 __all__ = [
     "SIGNAL_NAMES",
+    "CalibrationReport",
+    "calibrate_weights",
+    "measure_visibility",
     "AnswerSentence",
     "GEOScore",
     "GEOScorer",

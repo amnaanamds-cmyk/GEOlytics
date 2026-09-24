@@ -54,7 +54,16 @@ class SentenceTransformerEmbedder(Embedder):
 
     @property
     def dim(self) -> int:
-        return int(self._model.get_sentence_embedding_dimension())
+        dim = self._model.get_sentence_embedding_dimension()
+        if dim is None:
+            # Some architectures (and misconfigured local checkpoints) do not
+            # expose a fixed output width. Failing here beats creating a Qdrant
+            # collection with a wrong vector size and discovering it on upsert.
+            raise RuntimeError(
+                f"{self.model_name!r} does not report a sentence embedding dimension; "
+                "it is probably not a sentence-embedding model"
+            )
+        return int(dim)
 
     @property
     def normalized(self) -> bool:

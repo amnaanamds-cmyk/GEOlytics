@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
+    name: unit tests (no services)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -31,10 +32,74 @@ jobs:
         run: ruff check backend tests
 
       - name: Test
-        run: pytest -q
+        run: pytest tests -q --ignore=tests/integration
 
       - name: Verify similarity metrics are rank-equivalent
-        run: |
-          python -m geolytics.cli check-metrics --n-passages 200
+        run: python -m geolytics.cli check-metrics --n-passages 200
         env:
           PYTHONPATH: backend
+
+  integration:
+    name: integration tests (postgres, redis, qdrant)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: geolytics
+          POSTGRES_PASSWORD: geolytics
+          POSTGRES_DB: geolytics
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U geolytics"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      qdrant:
+        image: qdrant/qdrant:v1.19.1
+        ports: ["6333:6333", "6334:6334"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # sentence-transformers is excluded on purpose: it pulls torch, and the
+      # wrapper is covered by tests/test_embedding_backend.py against a stub.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector,crawl,queue,postgres,lexical]"
+
+      - name: Create the test database
+        run: PGPASSWORD=geolytics createdb -h localhost -U geolytics geolytics_test
+        env:
+          PGPASSWORD: geolytics
+
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:6333/readyz && exit 0
+            sleep 2
+          done
+          echo "qdrant did not become ready" >&2
+          exit 1
+
+      # Integration tests skip themselves when a service is missing, so assert
+      # that they actually ran rather than silently skipping the whole job.
+      - name: Integration tests
+        run: pytest tests/integration -q -p no:randomly --tb=short -rs
+
+      - name: Fail if everything skipped
+        run: |
+          pytest tests/integration -q --collect-only >/dev/null
+          pytest tests/integration -q 2>&1 | tee /tmp/out.txt
+          grep -qE "[0-9]+ passed" /tmp/out.txt

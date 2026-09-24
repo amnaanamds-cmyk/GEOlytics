@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import SAMPLE_HTML
 from geolytics.chunking import Document, SentenceChunker
 from geolytics.crawl.extract import extract_document
 from geolytics.geo.engine import parse_citations
@@ -17,6 +16,7 @@ from geolytics.geo.scoring import (
 from geolytics.geo.signals import SIGNAL_NAMES, compute_signals
 from geolytics.geo.visibility import AnswerSentence, citation_visibility
 from geolytics.index.base import ScoredChunk
+from sample_data import SAMPLE_HTML
 
 
 @pytest.fixture

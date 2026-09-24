@@ -18,6 +18,7 @@ Design notes that belong in the methodology chapter:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from geolytics.evaluation.harness import (
     compare_runs,
     save_runs,
 )
+from geolytics.evaluation.heuristic_qagen import generate_heuristic_query_set
 from geolytics.evaluation.qagen import QAGenerationConfig, generate_query_set
 from geolytics.evaluation.report import comparison_table, methods_note, results_table
 from geolytics.llm import build_llm
@@ -75,6 +77,27 @@ def build_conditions(embedder: Any) -> list[Condition]:
     ]
 
 
+def build_query_set(
+    documents: Sequence[Any],
+    settings: Any,
+    generator: str = "auto",
+    questions_per_unit: int = 2,
+) -> tuple[Any, Any]:
+    """Generate the evaluation query set, LLM or template-based.
+
+    "auto" uses the LLM when one is configured and falls back to templates
+    otherwise, so a clean clone runs end to end without a model server. The
+    fallback is visible, never silent: heuristic queries carry
+    `provenance="heuristic"` and the returned report names the generator.
+    """
+    config = QAGenerationConfig(questions_per_unit=questions_per_unit)
+
+    if generator == "heuristic" or (generator == "auto" and settings.llm_backend == "none"):
+        return generate_heuristic_query_set(documents, config=config)
+
+    return generate_query_set(documents, llm=build_llm(settings), config=config)
+
+
 def run_chunking_experiment(
     url: str,
     max_pages: int = 10,
@@ -82,24 +105,27 @@ def run_chunking_experiment(
     baseline: str = "fixed+dense",
     out_path: Path | None = None,
     questions_per_unit: int = 2,
+    generator: str = "auto",
+    persist_as: str | None = None,
+    settings: Any = None,
 ) -> str:
-    settings = get_settings()
+    settings = settings or get_settings()
     embedder = build_embedder(settings)
 
     with Crawler(settings=settings) as crawler:
         results = crawler.crawl(url, max_pages=max_pages)
+        crawl_summary = crawler.stats.summary()
     if not results:
-        raise RuntimeError(f"no pages crawled from {url}: {crawler.stats.summary()}")
+        raise RuntimeError(f"no pages crawled from {url}: {crawl_summary}")
     documents = [r.document for r in results]
 
-    query_set, generation = generate_query_set(
-        documents,
-        llm=build_llm(settings),
-        config=QAGenerationConfig(questions_per_unit=questions_per_unit),
+    query_set, generation = build_query_set(
+        documents, settings, generator=generator, questions_per_unit=questions_per_unit
     )
     if len(query_set) == 0:
         raise RuntimeError(
-            "query generation produced nothing; check that the LLM backend is reachable"
+            "query generation produced nothing; "
+            "check the LLM backend, or pass --generator heuristic"
         )
 
     harness = ExperimentHarness(documents, query_set, embedder, top_k=10)
@@ -109,14 +135,26 @@ def run_chunking_experiment(
     if out_path is not None:
         save_runs(runs, out_path)
 
+    persisted = ""
+    if persist_as:
+        from geolytics.pipeline import persist_runs
+
+        run_ids = persist_runs(persist_as, runs, query_set)
+        persisted = (
+            f"Persisted {len(run_ids)} runs as experiment {persist_as!r}; "
+            f"read them back from GET /experiments/{persist_as}"
+        )
+
     return "\n\n".join(
         [
             f"# Chunking x retrieval on {url}",
+            crawl_summary,
+            generation.summary(),
             (
-                f"{generation.n_generated} queries from {generation.n_units} generation units "
-                f"(mean lexical overlap {generation.mean_lexical_overlap:.2f}, "
-                f"{generation.n_dropped_overlap} dropped above threshold, "
-                f"{generation.n_failed_units} units failed)"
+                "NOTE: template-generated queries are lexically biased toward their "
+                "source passage and must not be used for reported results."
+                if generation.config.get("generator") == "heuristic"
+                else ""
             ),
             "## Results",
             results_table(runs, [metric, "recall@10", "mrr@10", "precision@5"]),
@@ -124,8 +162,7 @@ def run_chunking_experiment(
             comparison_table(comparisons),
             "## Methods",
             methods_note(runs, metric=metric),
-            (
-                "Saved to " + str(out_path) if out_path else "Not saved (pass --out to persist)"
-            ),
+            ("Saved to " + str(out_path) if out_path else "Not written to disk"),
+            persisted,
         ]
     )

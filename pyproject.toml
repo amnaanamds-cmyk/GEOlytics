@@ -26,7 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 crawl = ["playwright>=1.42", "beautifulsoup4>=4.12", "lxml>=5.1", "trafilatura>=1.8"]
-vector = ["qdrant-client>=1.8"]
+vector = ["qdrant-client>=1.12"]
 embed = ["sentence-transformers>=2.6"]
 lexical = ["rank-bm25>=0.2.2"]
 queue = ["arq>=0.25", "redis>=5.0"]

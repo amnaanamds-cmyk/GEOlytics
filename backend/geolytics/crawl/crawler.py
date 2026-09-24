@@ -42,11 +42,13 @@ class CrawlStats:
     cached: int = 0
     skipped_robots: int = 0
     skipped_type: int = 0
+    skipped_duplicate: int = 0
     errors: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"{self.fetched} fetched ({self.cached} from cache), "
+            f"{self.skipped_duplicate} duplicate content, "
             f"{self.skipped_robots} disallowed by robots.txt, "
             f"{self.skipped_type} non-HTML, {len(self.errors)} errors"
         )
@@ -94,6 +96,7 @@ class Crawler:
 
         queue: deque[str] = deque([_canonical(start_url)])
         seen: set[str] = {_canonical(start_url)}
+        seen_content: set[str] = set()
         results: list[CrawlResult] = []
 
         while queue and len(results) < limit:
@@ -107,6 +110,17 @@ class Crawler:
             result = self._fetch(url)
             if result is None:
                 continue
+
+            # URL canonicalisation cannot catch every alias: "/" and
+            # "/index.html" are distinct URLs serving identical content, as are
+            # most tracking-parameter variants. Indexing the same text under two
+            # doc_ids would duplicate every chunk derived from it, which inflates
+            # the corpus and gives a query two equally valid gold answers.
+            fingerprint = _content_fingerprint(result.document.text)
+            if fingerprint in seen_content:
+                self.stats.skipped_duplicate += 1
+                continue
+            seen_content.add(fingerprint)
 
             results.append(result)
 
@@ -197,6 +211,11 @@ class Crawler:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+
+def _content_fingerprint(text: str) -> str:
+    """Hash of the extracted text, whitespace-normalised."""
+    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()
 
 
 def _canonical(url: str) -> str:

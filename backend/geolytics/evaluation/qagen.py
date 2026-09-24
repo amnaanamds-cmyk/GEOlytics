@@ -86,7 +86,7 @@ class QAGenerationConfig:
     multi_hop: bool = True
     temperature: float = 0.3
     max_units: int | None = None
-    min_unit_tokens: int = 25
+    min_unit_tokens: int = 15
     max_lexical_overlap: float | None = 0.8
 
     def extra_rules(self) -> str:
@@ -111,7 +111,13 @@ class QAGenerationConfig:
 
 @dataclass(slots=True)
 class GenerationReport:
-    """Diagnostics for one generation pass."""
+    """Diagnostics for one generation pass.
+
+    `n_units_too_short` is reported because it is otherwise invisible: a site
+    of short sections can have most of its content silently excluded from the
+    evaluation set, leaving a query count too small to test anything. Seeing
+    the number is what prompts lowering `min_unit_tokens` or merging sections.
+    """
 
     n_units: int
     n_generated: int
@@ -119,6 +125,17 @@ class GenerationReport:
     n_failed_units: int
     mean_lexical_overlap: float
     config: dict[str, Any] = field(default_factory=dict)
+    n_units_too_short: int = 0
+
+    def summary(self) -> str:
+        generator = self.config.get("generator", "llm")
+        return (
+            f"{self.n_generated} queries from {self.n_units} units via the "
+            f"{generator} generator (mean lexical overlap "
+            f"{self.mean_lexical_overlap:.2f}; {self.n_units_too_short} units below the "
+            f"length threshold, {self.n_dropped_overlap} queries dropped above the "
+            f"overlap threshold, {self.n_failed_units} units failed)"
+        )
 
 
 def lexical_overlap(query_text: str, passage_text: str) -> float:
@@ -136,6 +153,25 @@ def lexical_overlap(query_text: str, passage_text: str) -> float:
     return len(query_terms & passage_terms) / len(query_terms)
 
 
+def eligible_units(
+    documents: Sequence[Document],
+    chunker: ChunkingStrategy,
+    config: QAGenerationConfig,
+) -> tuple[list[tuple[Document, Chunk]], int]:
+    """Generation units long enough to carry an answer, plus the rejected count."""
+    units: list[tuple[Document, Chunk]] = []
+    too_short = 0
+    for document in documents:
+        for unit in chunker.chunk(document):
+            if len(unit.text.split()) >= config.min_unit_tokens:
+                units.append((document, unit))
+            else:
+                too_short += 1
+    if config.max_units is not None:
+        units = units[: config.max_units]
+    return units, too_short
+
+
 def generate_query_set(
     documents: Sequence[Document],
     llm: LLMClient,
@@ -147,13 +183,7 @@ def generate_query_set(
     config = config or QAGenerationConfig()
     chunker = generation_chunker or DEFAULT_GENERATION_CHUNKER
 
-    units: list[tuple[Document, Chunk]] = []
-    for document in documents:
-        for unit in chunker.chunk(document):
-            if len(unit.text.split()) >= config.min_unit_tokens:
-                units.append((document, unit))
-    if config.max_units is not None:
-        units = units[: config.max_units]
+    units, too_short = eligible_units(documents, chunker, config)
 
     queries: list[Query] = []
     overlaps: list[float] = []
@@ -206,7 +236,8 @@ def generate_query_set(
         n_dropped_overlap=dropped,
         n_failed_units=failed,
         mean_lexical_overlap=(sum(overlaps) / len(overlaps)) if overlaps else 0.0,
-        config=config.to_dict(),
+        config={**config.to_dict(), "generator": "llm"},
+        n_units_too_short=too_short,
     )
     query_set = QuerySet(
         name=name,

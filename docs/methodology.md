@@ -35,9 +35,23 @@ Report from `GenerationReport`:
 | Quantity | Why it matters |
 |---|---|
 | `n_units`, `n_generated` | sample size |
+| `n_units_too_short` | content excluded before generation. On a site of short sections this can be most of the page, leaving too few queries to test anything — lower `min_unit_tokens` rather than accepting it |
 | `mean_lexical_overlap` | the bias toward BM25. Near 1.0 invalidates any claim that dense beats lexical |
 | `n_dropped_overlap` | how much bias you removed |
 | `n_failed_units` | LLM reliability |
+
+### The template fallback is not the method
+
+With no LLM configured, `build_query_set` falls back to
+`heuristic_qagen.generate_heuristic_query_set`, which builds questions from
+templates and corpus-salience terms. It exists so the pipeline runs from a
+clean clone and in CI — not so the evaluation can skip the LLM.
+
+Template questions reuse their source passage's vocabulary, which flatters BM25
+and any hybrid retriever containing it. Queries are marked
+`provenance="heuristic"`, the experiment output prints a warning, and
+`QuerySet.filter_provenance` lets you separate them. Never report a result
+produced from them.
 
 ### The step that defends everything else
 
@@ -133,11 +147,21 @@ match. `results_table` includes them by default.
 
 ## 7. GEO scoring
 
+`geolytics calibrate <url>` runs steps 1–3; `geo.calibration.calibrate_weights`
+is the library entry point.
+
 1. Compute signals per page (`compute_signals`).
 2. Run the simulated engine over the query set; collect
-   `ImpressionMetrics.position_adjusted_share` per page.
+   `ImpressionMetrics.position_adjusted_share` per page, averaged over *every*
+   query rather than only the ones where the page was cited.
 3. `fit_weights(reports, observed)` — non-negative least squares.
 4. Report R², `n_observations`, and `signal_correlations`.
+
+Calibration refuses to fit — and says why — when there are no more pages than
+signals (the system is underdetermined) or when fewer than two pages were cited
+(the regression target has no variance). Both cases return uniform weights
+flagged `fitted=False`, which the scorer and the API then surface as a caveat
+rather than a number.
 
 Non-negative because a negative coefficient would claim "adding citations makes
 you less visible", which this data cannot support and which cannot be explained
@@ -176,6 +200,8 @@ Phrase the conclusion exactly like this:
 | Fitted weights are associations, not causes | stated at every point the weights appear; the causal version is an intervention study |
 | ANN recall loss confounds the index | experiments use exact search; measure the Qdrant gap rather than assuming it away |
 | Regex sentence segmentation | swap in spaCy/PySBD **before** the experiments, never between them |
+| URL aliases duplicating content | the crawler fingerprints extracted text and drops repeats; `skipped_duplicate` is reported |
+| Template-generated queries leaking into results | marked `provenance="heuristic"`; filter with `QuerySet.filter_provenance` |
 | Generative engines change over time | record the date of every external observation |
 
 ## Suggested milestones

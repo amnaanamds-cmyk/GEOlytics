@@ -35,10 +35,11 @@ behaviour is a separate, explicitly correlational step (see
 | GEO | `geolytics.geo` | content signals, simulated engine, visibility, fitted scoring |
 | API | `geolytics.api` | FastAPI |
 | Persistence | `geolytics.db` | PostgreSQL via SQLAlchemy 2.0 |
+| Calibration | `geolytics.geo.calibration` | fits signal weights against measured visibility |
 | Tasks | `geolytics.tasks` | arq + Redis |
 
-Not yet built: the Next.js frontend. The API it will consume is defined and
-running.
+Not yet built: the Next.js frontend. The API it will consume is running and
+documented at `/docs`.
 
 ## Quickstart
 
@@ -50,19 +51,31 @@ pip install -e ".[all]"          # everything, including torch
 cp .env.example .env
 docker compose up -d             # postgres, qdrant, redis
 
-make test                        # 226 tests, no services needed
+make test-unit                   # 238 tests, no services, no network
 geolytics init-db
 make api                         # http://localhost:8000/docs
 make worker                      # in another shell
+make test-integration            # 72 more, against the live stack
 ```
+
+No Docker daemon, or blocked by a registry rate limit? The native recipe is in
+[docs/running.md](docs/running.md) — that is the path this stack was verified
+on.
 
 ### Command line
 
 ```bash
 geolytics audit https://example.com --max-pages 20
-geolytics experiment https://example.com --metric ndcg@10 --baseline fixed+dense
-geolytics check-metrics          # see "Similarity metrics" below
+geolytics experiment https://example.com --persist-as chunking
+geolytics calibrate https://example.com --max-pages 30   # fits the GEO weights
+geolytics check-metrics                                  # see below
 ```
+
+Two defaults are development fixtures and are refused or flagged in anything
+resembling a real run: the `hashing` embedder (no semantics, refused when
+`GEOLYTICS_ENV=production`) and `GEOLYTICS_LLM_BACKEND=none` (template query
+generation, marked `provenance="heuristic"`). Both are covered in
+[docs/running.md](docs/running.md).
 
 ## The research contribution
 
@@ -120,10 +133,16 @@ bounded, discrete and skewed. Result tables always carry `n chunks` and
 ### 4. GEO weights are fitted, not asserted
 
 Inventing "schema markup is 15% of the score" is the most attackable move
-available. Default weights are uniform and **labelled unfitted** — the API even
-returns a caveat string. `geo.scoring.fit_weights` derives them by non-negative
-least squares against visibility measured in the simulated engine, and records
-R², the observation count, and the collinearity between signals.
+available. Default weights are uniform and **labelled unfitted** — the API
+returns a caveat string and the CLI prints a warning.
+
+`geolytics calibrate` closes the loop: it runs the simulated generative engine
+over the evaluation queries, measures the position-weighted share of each
+answer that came from each page, and fits the weights by non-negative least
+squares against that. It records R², the observation count and the
+collinearity between signals, and it refuses to fit at all when there are
+fewer pages than signals or when too few pages were cited for the target to
+carry any variance.
 
 The signal set comes from Aggarwal et al., *GEO: Generative Engine
 Optimization* (KDD 2024) plus properties that follow from how RAG pipelines
@@ -133,18 +152,32 @@ before citing numbers.**
 ## Testing
 
 ```bash
-make test        # 226 tests
+make test-unit         # 238 tests: no network, no GPU, no services
+make test-integration  #  72 tests: skips whatever is not running
 make lint
 make typecheck
 ```
 
-The suite needs no network, no GPU and no running service: the `hashing`
-embedder is a deterministic fixture and the in-memory store does exact search.
-That fixture is refused in production settings — it carries no semantics, so
-results produced with it are meaningless.
+310 tests in total, all passing. The unit suite needs nothing running — the
+`hashing` embedder is deterministic and the in-memory store does exact search.
+
+The integration suite exercises what unit tests cannot:
+
+| Area | What is actually run |
+|---|---|
+| Crawler | a real HTTP server for `tests/fixtures/site/` — robots.txt, `Crawl-delay`, link following, host scoping, caching, content dedup |
+| Qdrant | real server: upsert, payload fidelity, recreate, and agreement with exact NumPy search |
+| PostgreSQL | real schema, JSON round-trips, cascade deletes, audit persistence, document rehydration |
+| Redis / arq | an enqueued job drained by a real burst worker |
+| LLM + engine | a stub `/api/generate` server: HTTP, JSON salvaging, citation parsing, visibility |
+| Sentence-Transformers | the wrapper against a stub model — prefixes, normalisation, dtype, dimension |
+
+Each service-backed test skips itself when its service is absent, so the
+default run stays green on a bare machine.
 
 ## Documentation
 
+- [docs/running.md](docs/running.md) — how to run it, including without Docker, and the two fixtures to switch off before reporting anything
 - [docs/methodology.md](docs/methodology.md) — the experimental protocol, threats to validity, and what to write in the report
 - [docs/architecture.md](docs/architecture.md) — layering and the reasoning behind each component choice
 

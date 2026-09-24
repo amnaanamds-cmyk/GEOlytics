@@ -213,6 +213,72 @@ def mark_audit_failed(audit_id: int, error: str) -> None:
             audit.error = error
 
 
+def persist_runs(
+    experiment: str,
+    runs: Sequence[Any],
+    query_set: Any = None,
+    site_id: int | None = None,
+) -> list[int]:
+    """Write experiment runs and their per-query scores to the database.
+
+    Per-query rows are the point of this function. The aggregate on
+    `ExperimentRun` is a convenience for listing conditions; every significance
+    test is recomputed from `QueryRecord`, so storing only means would make the
+    `/experiments` endpoint unable to produce a p-value at all.
+    """
+    from geolytics.db.models import ExperimentRun, QueryRecord
+
+    queries = {q.query_id: q for q in (query_set or [])}
+    run_ids: list[int] = []
+
+    with session_scope() as session:
+        for run in runs:
+            row = ExperimentRun(
+                experiment=experiment,
+                condition=run.condition,
+                site_id=site_id,
+                chunker=run.chunker,
+                retriever=run.retriever,
+                index_stats={
+                    "n_chunks": run.index_stats.n_chunks,
+                    "mean_tokens": run.index_stats.mean_tokens,
+                    "median_tokens": run.index_stats.median_tokens,
+                    "p10_tokens": run.index_stats.p10_tokens,
+                    "p90_tokens": run.index_stats.p90_tokens,
+                    "total_tokens": run.index_stats.total_tokens,
+                },
+                projection={
+                    "n_queries": run.projection.n_queries,
+                    "n_projected": run.projection.n_projected,
+                    "n_unmatched": run.projection.n_unmatched,
+                    "n_judgments": run.projection.n_judgments,
+                },
+                aggregate=run.aggregate(),
+                n_queries=run.n_queries_scored,
+                elapsed_seconds=run.elapsed_seconds,
+                notes=run.notes or None,
+            )
+            session.add(row)
+            session.flush()
+            run_ids.append(row.id)
+
+            for query_id, metrics in run.per_query.items():
+                query = queries.get(query_id)
+                session.add(
+                    QueryRecord(
+                        run_id=row.id,
+                        query_id=query_id,
+                        query_text=query.text if query else "",
+                        provenance=query.provenance if query else "synthetic",
+                        metrics=metrics,
+                        ranked_chunk_ids=run.ranked.get(query_id, []),
+                        n_relevant=query.n_relevant if query else 0,
+                    )
+                )
+
+    return run_ids
+
+
 def site_documents(session: Any, crawl_id: int) -> Sequence[Document]:
     """Rehydrate `Document` objects from a stored crawl, without re-crawling."""
     from geolytics.chunking.base import Section

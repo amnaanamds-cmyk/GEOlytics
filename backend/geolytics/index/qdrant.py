@@ -36,13 +36,26 @@ class QdrantVectorStore(VectorStore):
     def create_collection(self, name: str, dim: int, metric: Metric = "cosine") -> None:
         from qdrant_client.models import Distance, VectorParams
 
-        self._client.recreate_collection(
+        # Drop-then-create rather than the old `recreate_collection`, which was
+        # deprecated and then removed from the client. Recreating is the right
+        # semantic here: a collection is rebuilt per chunking configuration, and
+        # leaving stale points from a previous run would corrupt the index.
+        if self._client.collection_exists(collection_name=name):
+            self._client.delete_collection(collection_name=name)
+        self._client.create_collection(
             collection_name=name,
             vectors_config=VectorParams(size=dim, distance=Distance(_DISTANCE[metric])),
         )
 
     def drop_collection(self, name: str) -> None:
-        self._client.delete_collection(collection_name=name)
+        if self._client.collection_exists(collection_name=name):
+            self._client.delete_collection(collection_name=name)
+
+    def count(self, name: str) -> int:
+        return int(self._client.count(collection_name=name, exact=True).count)
+
+    def close(self) -> None:
+        self._client.close()
 
     def upsert(self, name: str, chunks: Sequence[Chunk], vectors: np.ndarray) -> None:
         from qdrant_client.models import PointStruct
@@ -74,16 +87,21 @@ class QdrantVectorStore(VectorStore):
                 "Qdrant fixes the distance metric per collection; "
                 "create one collection per metric instead of overriding at query time"
             )
-        hits = self._client.search(
+        # `search` was removed from qdrant-client in 1.19; `query_points` is the
+        # current entry point and returns a response object rather than a list.
+        response = self._client.query_points(
             collection_name=name,
-            query_vector=np.asarray(query_vector, dtype=np.float32).reshape(-1).tolist(),
+            query=np.asarray(query_vector, dtype=np.float32).reshape(-1).tolist(),
             limit=top_k,
             with_payload=True,
         )
         return [
-            ScoredChunk(chunk=_chunk_from_payload(hit.payload or {}), score=float(hit.score),
-                        rank=rank)
-            for rank, hit in enumerate(hits, start=1)
+            ScoredChunk(
+                chunk=_chunk_from_payload(hit.payload or {}),
+                score=float(hit.score),
+                rank=rank,
+            )
+            for rank, hit in enumerate(response.points, start=1)
         ]
 
     def describe(self) -> dict[str, Any]:

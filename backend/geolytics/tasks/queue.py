@@ -62,8 +62,27 @@ async def run_audit_task(ctx: dict[str, Any], audit_id: int) -> dict[str, Any]:
 
 
 def enqueue_audit(audit_id: int) -> None:
-    """Enqueue from synchronous request-handling code."""
-    asyncio.run(_enqueue(audit_id))
+    """Enqueue from synchronous request-handling code.
+
+    FastAPI runs a plain `def` route in a worker thread, where no event loop is
+    running and `asyncio.run` is correct. Calling this from inside a coroutine
+    would raise a confusing "cannot be called from a running event loop", so
+    that case is detected and pointed at the async version instead.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_enqueue(audit_id))
+        return
+    raise RuntimeError(
+        "enqueue_audit() is for synchronous callers; "
+        "await enqueue_audit_async() from inside a coroutine"
+    )
+
+
+async def enqueue_audit_async(audit_id: int) -> None:
+    """Enqueue from async code."""
+    await _enqueue(audit_id)
 
 
 async def _enqueue(audit_id: int) -> None:
@@ -77,12 +96,15 @@ async def _enqueue(audit_id: int) -> None:
 
 
 class WorkerSettings:
-    """`arq geolytics.tasks.queue.WorkerSettings`"""
+    """Worker configuration for `arq geolytics.tasks.queue.WorkerSettings`.
+
+    arq reads these as plain class *attributes* -- it does not call them -- so
+    `redis_settings` must be a `RedisSettings` instance, not a method. It is
+    therefore resolved when this module is imported, which for the worker
+    process is startup.
+    """
 
     functions = [run_audit_task]
     max_jobs = 2  # Embedding is CPU-bound; more concurrency just thrashes.
     job_timeout = 1800
-
-    @staticmethod
-    def redis_settings() -> RedisSettings:
-        return RedisSettings.from_dsn(get_settings().redis_url)
+    redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
