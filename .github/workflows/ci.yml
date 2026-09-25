@@ -96,10 +96,74 @@ jobs:
       # Integration tests skip themselves when a service is missing, so assert
       # that they actually ran rather than silently skipping the whole job.
       - name: Integration tests
-        run: pytest tests/integration -q -p no:randomly --tb=short -rs
+        run: pytest tests/integration -q --tb=short -rs
 
+      # These tests skip themselves when a service is missing, so assert that
+      # they actually ran rather than silently skipping the whole job.
       - name: Fail if everything skipped
         run: |
-          pytest tests/integration -q --collect-only >/dev/null
           pytest tests/integration -q 2>&1 | tee /tmp/out.txt
           grep -qE "[0-9]+ passed" /tmp/out.txt
+
+  frontend:
+    name: dashboard (typecheck, lint, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+
+  migrations:
+    name: migrations match the models
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: geolytics
+          POSTGRES_PASSWORD: geolytics
+          POSTGRES_DB: geolytics
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U geolytics"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -e ".[dev,postgres]"
+
+      - name: Apply migrations
+        run: alembic upgrade head
+        env:
+          GEOLYTICS_POSTGRES_DSN: postgresql+psycopg://geolytics:geolytics@localhost:5432/geolytics
+
+      # A model change without a migration is a deploy that fails at runtime.
+      # Autogenerate must find nothing once head is applied.
+      - name: Fail on schema drift
+        run: |
+          alembic revision --autogenerate -m drift-check --rev-id driftcheck 2>&1 | tee /tmp/drift.txt
+          if grep -qiE "Detected (added|removed|changed|new)" /tmp/drift.txt; then
+            echo "::error::models and migrations have diverged; run alembic revision --autogenerate"
+            exit 1
+          fi
+        env:
+          GEOLYTICS_POSTGRES_DSN: postgresql+psycopg://geolytics:geolytics@localhost:5432/geolytics

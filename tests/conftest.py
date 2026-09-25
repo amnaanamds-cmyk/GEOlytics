@@ -9,6 +9,25 @@ from geolytics.embedding.hashing import HashingEmbedder
 from geolytics.evaluation.qrels import Query, QuerySet, SpanRelevance
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _ignore_developer_env_file():
+    """Stop Settings reading the repo's .env during tests.
+
+    A developer running the stack locally has a .env with permissive crawl
+    settings, which would otherwise leak into every Settings() a test builds
+    and change what the suite asserts. Tests must depend on what they pass in
+    and on monkeypatched variables, never on an untracked file.
+    """
+    from geolytics.config import Settings
+
+    original = Settings.model_config.get("env_file")
+    Settings.model_config["env_file"] = None
+    try:
+        yield
+    finally:
+        Settings.model_config["env_file"] = original
+
+
 @pytest.fixture
 def embedder() -> HashingEmbedder:
     return HashingEmbedder(dim=128, seed=7)

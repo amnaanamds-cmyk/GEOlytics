@@ -8,6 +8,9 @@ in AI-generated answers. It also runs the pipeline as a controlled experiment,
 so the chunking and retrieval choices behind the audit are measured rather than
 assumed.
 
+It ships as a multi-tenant service: organisations, authentication, API keys,
+metered plans, rate limiting, Stripe billing and a Next.js dashboard.
+
 ## Scope, stated precisely
 
 This system **simulates and evaluates** factors affecting AI-search visibility.
@@ -37,9 +40,25 @@ behaviour is a separate, explicitly correlational step (see
 | Persistence | `geolytics.db` | PostgreSQL via SQLAlchemy 2.0 |
 | Calibration | `geolytics.geo.calibration` | fits signal weights against measured visibility |
 | Tasks | `geolytics.tasks` | arq + Redis |
+| **Tenancy** | `geolytics.tenancy` | organisations, roles, scopes, plans, quotas |
+| **Security** | `geolytics.security` | Argon2id passwords, typed JWTs, API keys |
+| **SSRF policy** | `geolytics.crawl.guard` | the product's security boundary |
+| **Billing** | `geolytics.billing` | Stripe checkout, portal, signed webhooks |
+| **Dashboard** | `frontend/` | Next.js 16, httpOnly-cookie sessions |
 
-Not yet built: the Next.js frontend. The API it will consume is running and
-documented at `/docs`.
+## Security in one paragraph
+
+The crawler fetches customer-supplied URLs from inside your network, which is
+the defining vulnerability of this product category. `geolytics.crawl.guard`
+refuses non-http schemes, every private and metadata address in both IP
+families, and non-web ports; it dials the address it validated (so DNS cannot
+change its answer after the check), revalidates every redirect hop, and caps
+the response size. Tenant isolation comes from the authenticated principal and
+is applied in the `WHERE` clause, so another tenant's id reads as 404. Tokens
+live in httpOnly cookies, never `localStorage`. Production refuses to start on
+a placeholder signing key, wildcard CORS, a crawler allowed to reach private
+addresses, or the test-fixture embedder. Full detail, including what is **not**
+covered, is in [docs/security.md](docs/security.md).
 
 ## Quickstart
 
@@ -51,11 +70,21 @@ pip install -e ".[all]"          # everything, including torch
 cp .env.example .env
 docker compose up -d             # postgres, qdrant, redis
 
-make test-unit                   # 238 tests, no services, no network
-geolytics init-db
+make test-unit                   # no services, no network
+alembic upgrade head
 make api                         # http://localhost:8000/docs
 make worker                      # in another shell
-make test-integration            # 72 more, against the live stack
+make test-integration            # against the live stack
+
+cd frontend && npm install
+GEOLYTICS_API_URL=http://localhost:8000 npm run dev   # http://localhost:3000
+```
+
+Then open the dashboard and create an account, or bootstrap one from the CLI:
+
+```bash
+GEOLYTICS_ADMIN_PASSWORD='...' \
+  geolytics create-org "Acme Plumbing" --email owner@acme.com --plan growth
 ```
 
 No Docker daemon, or blocked by a registry rate limit? The native recipe is in
@@ -152,14 +181,17 @@ before citing numbers.**
 ## Testing
 
 ```bash
-make test-unit         # 238 tests: no network, no GPU, no services
-make test-integration  #  72 tests: skips whatever is not running
+make test-unit         # no network, no GPU, no services
+make test-integration  # skips whatever is not running
 make lint
 make typecheck
+
+cd frontend && npm run typecheck && npm run lint && npm run build
+SHOT_DIR=./shots npm run e2e   # drives a real browser; see frontend/e2e/README.md
 ```
 
-310 tests in total, all passing. The unit suite needs nothing running — the
-`hashing` embedder is deterministic and the in-memory store does exact search.
+The unit suite needs nothing running — the `hashing` embedder is deterministic
+and the in-memory store does exact search.
 
 The integration suite exercises what unit tests cannot:
 
@@ -171,16 +203,26 @@ The integration suite exercises what unit tests cannot:
 | Redis / arq | an enqueued job drained by a real burst worker |
 | LLM + engine | a stub `/api/generate` server: HTTP, JSON salvaging, citation parsing, visibility |
 | Sentence-Transformers | the wrapper against a stub model — prefixes, normalisation, dtype, dimension |
+| Auth & tenancy | signup, login, refresh, scope and role enforcement, and that one org cannot read, delete or list another's data |
+| Quotas & limits | every plan ceiling, and the 402 a customer actually sees |
+| Rate limiting | a real Redis token bucket, plus fail-open when it is gone |
+| Billing | that an unsigned or forged webhook changes nothing |
+| Dashboard | a real browser: signup, audit run, charts, quota refusal, dark mode, mobile width, sign-out |
 
 Each service-backed test skips itself when its service is absent, so the
 default run stays green on a bare machine.
 
 ## Documentation
 
-- [docs/running.md](docs/running.md) — how to run it, including without Docker, and the two fixtures to switch off before reporting anything
+- [docs/security.md](docs/security.md) — the security model, and what is **not** covered
+- [docs/deploying.md](docs/deploying.md) — production deployment, scaling, and the pre-launch checklist
+- [docs/running.md](docs/running.md) — running locally, including without Docker, and the two fixtures to switch off before reporting anything
 - [docs/methodology.md](docs/methodology.md) — the experimental protocol, threats to validity, and what to write in the report
 - [docs/architecture.md](docs/architecture.md) — layering and the reasoning behind each component choice
 
 ## Licence
 
-MIT
+MIT. Dependency licences were audited for commercial distribution: no GPL,
+AGPL or SSPL. `trafilatura` has been Apache-2.0 since v1.8, and the only LGPL
+component is `psycopg`, used unmodified — which LGPL permits in a proprietary
+product. Swap it for `pg8000` (BSD) if you want zero LGPL in the tree.
