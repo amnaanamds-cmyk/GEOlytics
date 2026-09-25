@@ -44,6 +44,8 @@ async def run_audit_task(ctx: dict[str, Any], audit_id: int) -> dict[str, Any]:
         outcome = await asyncio.to_thread(
             run_audit,
             url,
+            # Already capped to the plan's per-audit ceiling when the audit was
+            # accepted, so the worker never has to know about plans.
             max_pages=int(config.get("max_pages", 25)),
             chunker=str(config.get("chunker", "sentence")),
         )

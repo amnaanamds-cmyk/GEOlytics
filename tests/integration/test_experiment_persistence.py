@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from services import POSTGRES_DSN, make_test_settings, requires_postgres
+from services import POSTGRES_DSN, create_org, make_test_settings, requires_postgres
 
 from geolytics.chunking import SentenceChunker, build_chunker
 from geolytics.db.models import Base, ExperimentRun, QueryRecord
@@ -48,6 +48,14 @@ def db(monkeypatch):
 
 
 @pytest.fixture
+def org_id(db):
+    from geolytics.db.session import session_scope
+
+    with session_scope() as session:
+        return create_org(session).id
+
+
+@pytest.fixture
 def runs(fixture_site):
     from geolytics.crawl.crawler import Crawler
 
@@ -68,9 +76,9 @@ def runs(fixture_site):
 
 
 class TestPersistRuns:
-    def test_writes_a_row_per_condition(self, db, runs):
+    def test_writes_a_row_per_condition(self, db, org_id, runs):
         run_list, query_set = runs
-        ids = persist_runs("grid", run_list, query_set)
+        ids = persist_runs("grid", run_list, query_set, org_id=org_id)
         assert len(ids) == len(run_list)
 
         from geolytics.db.session import session_scope
@@ -81,9 +89,9 @@ class TestPersistRuns:
             assert all(r.aggregate for r in rows)
             assert all(r.index_stats["n_chunks"] > 0 for r in rows)
 
-    def test_writes_one_query_record_per_scored_query(self, db, runs):
+    def test_writes_one_query_record_per_scored_query(self, db, org_id, runs):
         run_list, query_set = runs
-        persist_runs("grid", run_list, query_set)
+        persist_runs("grid", run_list, query_set, org_id=org_id)
 
         from geolytics.db.session import session_scope
 
@@ -100,10 +108,10 @@ class TestPersistRuns:
                 assert all(r.query_text for r in records)
                 assert all(r.provenance == "heuristic" for r in records)
 
-    def test_per_query_scores_round_trip_exactly(self, db, runs):
+    def test_per_query_scores_round_trip_exactly(self, db, org_id, runs):
         """The statistics are recomputed from these rows, so they must be exact."""
         run_list, query_set = runs
-        persist_runs("grid", run_list, query_set)
+        persist_runs("grid", run_list, query_set, org_id=org_id)
 
         from geolytics.db.session import session_scope
 
@@ -122,9 +130,9 @@ class TestPersistRuns:
         for query_id, metrics in run.per_query.items():
             assert stored[query_id] == pytest.approx(metrics)
 
-    def test_ranked_chunk_ids_are_kept_for_pooling(self, db, runs):
+    def test_ranked_chunk_ids_are_kept_for_pooling(self, db, org_id, runs):
         run_list, query_set = runs
-        persist_runs("grid", run_list, query_set)
+        persist_runs("grid", run_list, query_set, org_id=org_id)
 
         from geolytics.db.session import session_scope
 
@@ -134,15 +142,47 @@ class TestPersistRuns:
 
 
 class TestApiReadsPersistedRuns:
+    """The API is authenticated and org-scoped, so the runs need an owner."""
+
     @pytest.fixture
-    def client(self, db, runs):
+    def client(self, db, org_id, runs, monkeypatch):
+        monkeypatch.setenv("GEOLYTICS_SECRET_KEY", "i" * 48)
+        monkeypatch.setenv("GEOLYTICS_RATE_LIMIT_ENABLED", "false")
+
+        from geolytics.config import get_settings
+
+        get_settings.cache_clear()
+
         run_list, query_set = runs
-        persist_runs("grid", run_list, query_set)
+        persist_runs("grid", run_list, query_set, org_id=org_id)
 
         from geolytics.api.app import create_app
+        from geolytics.db.models import Membership, User
+        from geolytics.db.session import session_scope
+        from geolytics.security.passwords import hash_password
+        from geolytics.security.tokens import create_access_token
+        from geolytics.tenancy.principal import role_scopes
 
+        with session_scope() as session:
+            user = User(
+                email="owner@experiments.co",
+                password_hash=hash_password("correct-horse-staple-9"),
+            )
+            session.add(user)
+            session.flush()
+            session.add(Membership(user_id=user.id, org_id=org_id, role="owner"))
+            user_id = user.id
+
+        token = create_access_token(
+            user_id,
+            get_settings().secret_key,
+            org_id=org_id,
+            scopes=role_scopes("owner"),
+        )
         with TestClient(create_app()) as c:
+            c.headers.update({"Authorization": f"Bearer {token}"})
             yield c
+        get_settings.cache_clear()
 
     def test_returns_conditions_and_comparisons(self, client):
         body = client.get("/experiments/grid?metric=ndcg@10").json()

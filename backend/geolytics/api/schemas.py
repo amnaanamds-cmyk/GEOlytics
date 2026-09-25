@@ -63,6 +63,12 @@ class AuditOut(BaseModel):
     created_at: datetime | None = None
 
 
+class AuditListOut(BaseModel):
+    items: list[AuditOut]
+    limit: int
+    offset: int
+
+
 class ExperimentRunOut(BaseModel):
     condition: str
     chunker: dict[str, Any]

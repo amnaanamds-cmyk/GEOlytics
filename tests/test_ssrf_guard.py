@@ -165,11 +165,25 @@ class TestAddressPinning:
         assert resolve_host("93.184.216.34") == [ipaddress.ip_address("93.184.216.34")]
 
 
+def production_settings(**overrides):
+    """A Settings object that satisfies the production safety validator.
+
+    Production refuses to start on a placeholder secret or a test-fixture
+    embedder, so those have to be supplied to reach the crawl policy at all.
+    """
+    from geolytics.config import Settings
+
+    return Settings(
+        env="production",
+        secret_key="p" * 48,
+        embedding_backend="sentence-transformers",
+        **overrides,
+    )
+
+
 class TestPolicyFromSettings:
     def test_production_defaults_are_restrictive(self):
-        from geolytics.config import Settings
-
-        policy = UrlPolicy.from_settings(Settings(env="production"))
+        policy = UrlPolicy.from_settings(production_settings())
         assert not policy.allow_private_addresses
         assert policy.allowed_ports == frozenset({80, 443, 8080, 8443})
 
@@ -183,9 +197,7 @@ class TestPolicyFromSettings:
 
     def test_an_emptied_port_list_does_not_mean_everything(self):
         """Clearing the list must not silently allow every port."""
-        from geolytics.config import Settings
-
-        policy = UrlPolicy.from_settings(Settings(env="production", crawl_allowed_ports=[]))
+        policy = UrlPolicy.from_settings(production_settings(crawl_allowed_ports=[]))
         assert policy.allowed_ports == frozenset()
         with pytest.raises(UrlPolicyError, match="port"):
             validate_url("http://example.com/", policy)

@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# The worker image: same code, plus the embedding stack, running arq.
+FROM geolytics-api:latest AS base
+
+USER root
+RUN /opt/venv/bin/pip install --no-cache-dir "sentence-transformers>=2.6"
+USER geolytics
+
+# Models are downloaded on first use; mount a cache volume in production so a
+# restart does not re-fetch several hundred megabytes.
+ENV HF_HOME=/home/geolytics/.cache/huggingface
+
+HEALTHCHECK NONE
+
+CMD ["arq", "geolytics.tasks.queue.WorkerSettings"]

@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
-from services import POSTGRES_DSN, REDIS_URL, redis_available, requires_postgres, requires_redis
+from services import (
+    POSTGRES_DSN,
+    REDIS_URL,
+    create_org,
+    redis_available,
+    requires_postgres,
+    requires_redis,
+)
 
 from geolytics.db.models import Audit, Base, Site
 
@@ -49,13 +57,18 @@ def worker_env(monkeypatch, fixture_site):
 
 
 def _make_audit(url: str, max_pages: int = 4) -> int:
+    """An organisation, a site and a queued audit, as the API would create."""
     from geolytics.db.session import session_scope
 
     with session_scope() as session:
-        site = Site(url=url, host="127.0.0.1")
+        org = create_org(session, slug=f"worker-{uuid.uuid4().hex[:8]}")
+        site = Site(org_id=org.id, url=url, host="127.0.0.1")
         session.add(site)
         session.flush()
-        audit = Audit(site_id=site.id, status="pending", config={"max_pages": max_pages})
+        audit = Audit(
+            org_id=org.id, site_id=site.id, status="pending",
+            config={"max_pages": max_pages},
+        )
         session.add(audit)
         session.flush()
         return audit.id

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from services import POSTGRES_DSN, requires_postgres
+from services import POSTGRES_DSN, create_org, requires_postgres
 from sqlalchemy import select, text
 
 from geolytics.db.models import Audit, Base, Crawl, Page, PageScore, Site
@@ -33,14 +33,26 @@ def db(crawl_settings, monkeypatch):
 
 
 @pytest.fixture
-def audit_row(db):
+def org_id(db):
     from geolytics.db.session import session_scope
 
     with session_scope() as session:
-        site = Site(url="https://acme.example/", host="acme.example", name="Acme")
+        return create_org(session).id
+
+
+@pytest.fixture
+def audit_row(db, org_id):
+    from geolytics.db.session import session_scope
+
+    with session_scope() as session:
+        site = Site(
+            org_id=org_id, url="https://acme.example/", host="acme.example", name="Acme"
+        )
         session.add(site)
         session.flush()
-        audit = Audit(site_id=site.id, status="pending", config={"max_pages": 5})
+        audit = Audit(
+            org_id=org_id, site_id=site.id, status="pending", config={"max_pages": 5}
+        )
         session.add(audit)
         session.flush()
         return audit.id
@@ -65,7 +77,9 @@ class TestSchema:
         from geolytics.db.session import session_scope
 
         with session_scope() as session:
+            org = create_org(session, slug="json-test")
             run = ExperimentRun(
+                org_id=org.id,
                 experiment="e",
                 condition="c",
                 chunker={"strategy": "sentence", "params": {"max_tokens": 256}},

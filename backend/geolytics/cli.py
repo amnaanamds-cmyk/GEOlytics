@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -57,7 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     p_cal.add_argument("--chunker", default="sentence")
     p_cal.add_argument("--out", type=Path, default=Path("runs/weights.json"))
 
-    sub.add_parser("init-db", help="create database tables")
+    p_org = sub.add_parser(
+        "create-org", help="create an organisation and its first owner"
+    )
+    p_org.add_argument("name")
+    p_org.add_argument("--email", required=True)
+    p_org.add_argument("--password", help="read from GEOLYTICS_ADMIN_PASSWORD if omitted")
+    p_org.add_argument("--plan", default="free")
+
+    sub.add_parser("init-db", help="create database tables (prefer: alembic upgrade head)")
 
     args = parser.parse_args(argv)
 
@@ -65,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         return _audit(args)
     if args.command == "experiment":
         return _experiment(args)
+    if args.command == "create-org":
+        return _create_org(args)
     if args.command == "calibrate":
         return _calibrate(args)
     if args.command == "check-metrics":
@@ -73,7 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         from geolytics.db.session import create_all
 
         create_all()
-        print("tables created")
+        print(
+            "tables created.\nFor anything but a throwaway database, use "
+            "`alembic upgrade head` instead so the schema is versioned."
+        )
         return 0
     return 1
 
@@ -122,6 +136,59 @@ def _experiment(args: argparse.Namespace) -> int:
         persist_as=args.persist_as,
     )
     print(report)
+    return 0
+
+
+def _create_org(args: argparse.Namespace) -> int:
+    """Bootstrap the first tenant, for a fresh self-hosted install."""
+    import os
+
+    from sqlalchemy import func, select
+
+    from geolytics.db.models import Membership, Organization, User
+    from geolytics.db.session import session_scope
+    from geolytics.security.passwords import PasswordPolicyError, hash_password
+    from geolytics.tenancy.plans import PLANS
+
+    if args.plan not in PLANS:
+        print(f"unknown plan {args.plan!r}; expected one of {sorted(PLANS)}", file=sys.stderr)
+        return 2
+
+    password = args.password or os.environ.get("GEOLYTICS_ADMIN_PASSWORD")
+    if not password:
+        # Never prompt-free-default a password, and never accept one on the
+        # command line silently: argv is visible in `ps` on a shared host.
+        import getpass
+
+        password = getpass.getpass("Owner password: ")
+
+    try:
+        password_hash = hash_password(password)
+    except PasswordPolicyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    email = args.email.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", args.name.strip().lower()).strip("-")[:48] or "org"
+
+    with session_scope() as session:
+        if session.scalar(select(Organization.id).where(Organization.slug == slug)):
+            print(f"an organisation with slug {slug!r} already exists", file=sys.stderr)
+            return 1
+
+        user = session.scalar(select(User).where(func.lower(User.email) == email))
+        if user is None:
+            user = User(email=email, password_hash=password_hash, is_verified=True)
+            session.add(user)
+            session.flush()
+
+        org = Organization(slug=slug, name=args.name.strip(), plan=args.plan)
+        session.add(org)
+        session.flush()
+        session.add(Membership(user_id=user.id, org_id=org.id, role="owner"))
+
+        print(f"created organisation {org.name!r} (slug: {org.slug}, plan: {org.plan})")
+        print(f"owner: {user.email}")
     return 0
 
 

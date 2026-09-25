@@ -74,6 +74,20 @@ def make_test_settings(**overrides):
     return Settings(**{**defaults, **overrides})
 
 
+def create_org(session, name: str = "Test Org", slug: str = "test-org", plan: str = "growth"):
+    """An organisation to attach tenant-owned rows to.
+
+    Defaults to a plan with headroom, so a test that is about crawling does
+    not incidentally trip a Free-tier quota.
+    """
+    from geolytics.db.models import Organization
+
+    org = Organization(slug=slug, name=name, plan=plan)
+    session.add(org)
+    session.flush()
+    return org
+
+
 requires_qdrant = pytest.mark.skipif(not qdrant_available(), reason="qdrant not running")
 requires_postgres = pytest.mark.skipif(not postgres_available(), reason="postgres not running")
 requires_redis = pytest.mark.skipif(not redis_available(), reason="redis not running")

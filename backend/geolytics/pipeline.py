@@ -19,7 +19,7 @@ from geolytics.chunking.base import Chunk, ChunkingStrategy, Document
 from geolytics.chunking.registry import build_chunker
 from geolytics.config import Settings, get_settings
 from geolytics.crawl.crawler import Crawler
-from geolytics.db.models import Audit, Crawl, Page, PageScore, Site
+from geolytics.db.models import Audit, Crawl, Organization, Page, PageScore, Site
 from geolytics.db.session import session_scope
 from geolytics.embedding.base import Embedder
 from geolytics.embedding.registry import build_embedder
@@ -27,6 +27,7 @@ from geolytics.geo.scoring import GEOScore, GEOScorer, SignalWeights
 from geolytics.geo.signals import compute_signals
 from geolytics.index.base import VectorStore
 from geolytics.index.memory import InMemoryVectorStore
+from geolytics.tenancy.quotas import PAGES_CRAWLED, record_usage
 
 
 @dataclass(slots=True)
@@ -147,6 +148,7 @@ def persist_audit(audit_id: int, outcome: AuditOutcome) -> None:
 
         settings = get_settings()
         crawl = Crawl(
+            org_id=audit.org_id,
             site_id=site.id,
             status="complete",
             pages_fetched=len(outcome.documents),
@@ -204,6 +206,12 @@ def persist_audit(audit_id: int, outcome: AuditOutcome) -> None:
             **outcome.metadata,
         }
 
+        # Metered after the fact, on pages actually fetched. Charging for the
+        # requested page count would bill for pages robots.txt or the URL
+        # policy refused.
+        if outcome.documents:
+            record_usage(session, audit.org_id, PAGES_CRAWLED, len(outcome.documents))
+
 
 def mark_audit_failed(audit_id: int, error: str) -> None:
     with session_scope() as session:
@@ -218,6 +226,7 @@ def persist_runs(
     runs: Sequence[Any],
     query_set: Any = None,
     site_id: int | None = None,
+    org_id: int | None = None,
 ) -> list[int]:
     """Write experiment runs and their per-query scores to the database.
 
@@ -236,6 +245,7 @@ def persist_runs(
             row = ExperimentRun(
                 experiment=experiment,
                 condition=run.condition,
+                org_id=org_id or _default_org_id(session),
                 site_id=site_id,
                 chunker=run.chunker,
                 retriever=run.retriever,
@@ -277,6 +287,22 @@ def persist_runs(
                 )
 
     return run_ids
+
+
+def _default_org_id(session: Any) -> int:
+    """The organisation to attribute CLI-run experiments to.
+
+    The CLI has no authenticated caller. Rather than invent a null tenant --
+    which would create rows no API request could ever read back -- it uses the
+    oldest organisation, and refuses when there is none.
+    """
+    org_id = session.scalar(select(Organization.id).order_by(Organization.id))
+    if org_id is None:
+        raise ValueError(
+            "no organisation exists to attribute this run to; "
+            "create one via /auth/signup or `geolytics create-org` first"
+        )
+    return int(org_id)
 
 
 def site_documents(session: Any, crawl_id: int) -> Sequence[Document]:

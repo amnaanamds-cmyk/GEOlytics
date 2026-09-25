@@ -1,0 +1,105 @@
+# Production-shaped stack. Secrets come from the environment, never from this
+# file: `docker compose --env-file .env.production -f docker-compose.prod.yml up -d`.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: geolytics-api:latest
+    restart: unless-stopped
+    environment:
+      GEOLYTICS_ENV: production
+      GEOLYTICS_SECRET_KEY: ${GEOLYTICS_SECRET_KEY:?set a 32+ character random key}
+      GEOLYTICS_POSTGRES_DSN: postgresql+psycopg://geolytics:${POSTGRES_PASSWORD:?}@postgres:5432/geolytics
+      GEOLYTICS_REDIS_URL: redis://redis:6379/0
+      GEOLYTICS_QDRANT_URL: http://qdrant:6333
+      GEOLYTICS_CORS_ORIGINS: ${GEOLYTICS_CORS_ORIGINS:?set your dashboard origin}
+      GEOLYTICS_EMBEDDING_BACKEND: sentence-transformers
+      GEOLYTICS_BILLING_ENABLED: ${GEOLYTICS_BILLING_ENABLED:-false}
+      GEOLYTICS_STRIPE_SECRET_KEY: ${GEOLYTICS_STRIPE_SECRET_KEY:-}
+      GEOLYTICS_STRIPE_WEBHOOK_SECRET: ${GEOLYTICS_STRIPE_WEBHOOK_SECRET:-}
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    # The API never crawls; only the worker does. Keeping egress off this
+    # container removes it from the SSRF blast radius entirely.
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: geolytics-worker:latest
+    restart: unless-stopped
+    environment:
+      GEOLYTICS_ENV: production
+      GEOLYTICS_SECRET_KEY: ${GEOLYTICS_SECRET_KEY:?}
+      GEOLYTICS_POSTGRES_DSN: postgresql+psycopg://geolytics:${POSTGRES_PASSWORD:?}@postgres:5432/geolytics
+      GEOLYTICS_REDIS_URL: redis://redis:6379/0
+      GEOLYTICS_QDRANT_URL: http://qdrant:6333
+      GEOLYTICS_EMBEDDING_BACKEND: sentence-transformers
+      GEOLYTICS_LLM_BACKEND: ${GEOLYTICS_LLM_BACKEND:-none}
+      GEOLYTICS_OLLAMA_URL: ${GEOLYTICS_OLLAMA_URL:-http://ollama:11434}
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes: ["modelcache:/home/geolytics/.cache/huggingface"]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      replicas: 2
+
+  migrate:
+    image: geolytics-api:latest
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      GEOLYTICS_ENV: production
+      GEOLYTICS_SECRET_KEY: ${GEOLYTICS_SECRET_KEY:?}
+      GEOLYTICS_POSTGRES_DSN: postgresql+psycopg://geolytics:${POSTGRES_PASSWORD:?}@postgres:5432/geolytics
+      GEOLYTICS_EMBEDDING_BACKEND: sentence-transformers
+      GEOLYTICS_CORS_ORIGINS: ${GEOLYTICS_CORS_ORIGINS:?}
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: geolytics
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a database password}
+      POSTGRES_DB: geolytics
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geolytics"]
+      interval: 5s
+      retries: 10
+    # Not published: reachable only from the compose network.
+    expose: ["5432"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "900", "1", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    expose: ["6379"]
+    volumes: ["redisdata:/data"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes: ["qdrantdata:/qdrant/storage"]
+    expose: ["6333", "6334"]
+
+volumes:
+  pgdata:
+  redisdata:
+  qdrantdata:
+  modelcache:
