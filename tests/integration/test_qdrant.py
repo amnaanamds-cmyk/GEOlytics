@@ -6,7 +6,7 @@ from collections import Counter
 
 import numpy as np
 import pytest
-from services import QDRANT_URL, requires_qdrant
+from services import QDRANT_URL, make_test_settings, requires_qdrant
 
 from geolytics.chunking import SentenceChunker
 from geolytics.embedding.hashing import HashingEmbedder
@@ -39,10 +39,9 @@ def corpus_chunks(corpus_documents):
 
 @pytest.fixture
 def corpus_documents(fixture_site):
-    from geolytics.config import Settings
     from geolytics.crawl.crawler import Crawler
 
-    settings = Settings(env="test", crawl_delay_seconds=0.0, crawl_max_pages=10)
+    settings = make_test_settings(crawl_max_pages=10)
     with Crawler(settings=settings, cache_dir=None) as crawler:
         return [r.document for r in crawler.crawl(f"{fixture_site}/index.html")]
 

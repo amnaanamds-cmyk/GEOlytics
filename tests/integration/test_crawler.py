@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from geolytics.crawl.crawler import Crawler
+from geolytics.crawl.guard import UrlPolicy
 from geolytics.crawl.robots import RobotsPolicy
+
+# The fixture server is on loopback and an ephemeral port.
+LOOPBACK_OK = UrlPolicy(allow_private_addresses=True, allowed_ports=None)
 
 
 @pytest.fixture
@@ -80,15 +84,21 @@ class TestCrawl:
 
 class TestRobotsAgainstRealServer:
     def test_reads_the_served_robots_txt(self, fixture_site):
-        policy = RobotsPolicy(user_agent="GEOlyticsBot/0.1 (+test)", default_delay=0.0)
+        policy = RobotsPolicy(
+            user_agent="GEOlyticsBot/0.1 (+test)", default_delay=0.0, policy=LOOPBACK_OK
+        )
         assert policy.can_fetch(f"{fixture_site}/index.html")
         assert not policy.can_fetch(f"{fixture_site}/private/internal.html")
 
     def test_declared_crawl_delay_is_read(self, fixture_site):
-        policy = RobotsPolicy(user_agent="GEOlyticsBot/0.1 (+test)", default_delay=0.0)
+        policy = RobotsPolicy(
+            user_agent="GEOlyticsBot/0.1 (+test)", default_delay=0.0, policy=LOOPBACK_OK
+        )
         # The fixture declares Crawl-delay: 0, and our floor is 0 here.
         assert policy.crawl_delay(f"{fixture_site}/index.html") == 0.0
 
     def test_floor_delay_wins_over_a_smaller_declared_delay(self, fixture_site):
-        policy = RobotsPolicy(user_agent="GEOlyticsBot/0.1 (+test)", default_delay=1.5)
+        policy = RobotsPolicy(
+            user_agent="GEOlyticsBot/0.1 (+test)", default_delay=1.5, policy=LOOPBACK_OK
+        )
         assert policy.crawl_delay(f"{fixture_site}/index.html") == 1.5

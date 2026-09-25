@@ -27,6 +27,10 @@ def worker_env(monkeypatch, fixture_site):
     monkeypatch.setenv("GEOLYTICS_EMBEDDING_BACKEND", "hashing")
     monkeypatch.setenv("GEOLYTICS_EMBEDDING_DIM", "128")
     monkeypatch.setenv("GEOLYTICS_LLM_BACKEND", "none")
+    # The fixture site is on loopback and an ephemeral port; the production
+    # SSRF policy refuses both, by design.
+    monkeypatch.setenv("GEOLYTICS_CRAWL_ALLOW_PRIVATE_ADDRESSES", "true")
+    monkeypatch.setenv("GEOLYTICS_CRAWL_RESTRICT_PORTS", "false")
 
     from geolytics.config import get_settings
     from geolytics.db.session import get_engine, get_session_factory

@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from services import POSTGRES_DSN, QDRANT_URL, REDIS_URL
+from services import make_test_settings
 
 FIXTURE_SITE = Path(__file__).resolve().parents[1] / "fixtures" / "site"
 
@@ -53,18 +53,4 @@ def crawl_settings(fixture_site: str):
     robots.txt declares `Crawl-delay: 0`, so the floor delay is set to zero
     here to keep the suite fast -- this is the one place that is safe.
     """
-    from geolytics.config import Settings
-
-    return Settings(
-        env="test",
-        crawl_delay_seconds=0.0,
-        crawl_max_pages=10,
-        crawl_user_agent="GEOlyticsBot/0.1 (+test)",
-        crawl_respect_robots=True,
-        postgres_dsn=POSTGRES_DSN,
-        qdrant_url=QDRANT_URL,
-        redis_url=REDIS_URL,
-        embedding_backend="hashing",
-        embedding_dim=128,
-        llm_backend="none",
-    )
+    return make_test_settings()

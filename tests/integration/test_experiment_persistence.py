@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from services import POSTGRES_DSN, requires_postgres
+from services import POSTGRES_DSN, make_test_settings, requires_postgres
 
 from geolytics.chunking import SentenceChunker, build_chunker
 from geolytics.db.models import Base, ExperimentRun, QueryRecord
@@ -49,10 +49,9 @@ def db(monkeypatch):
 
 @pytest.fixture
 def runs(fixture_site):
-    from geolytics.config import Settings
     from geolytics.crawl.crawler import Crawler
 
-    settings = Settings(env="test", crawl_delay_seconds=0.0, crawl_max_pages=6)
+    settings = make_test_settings(crawl_max_pages=6)
     with Crawler(settings=settings, cache_dir=None) as crawler:
         documents = [r.document for r in crawler.crawl(f"{fixture_site}/index.html")]
 

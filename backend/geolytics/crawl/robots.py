@@ -21,6 +21,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from geolytics.crawl.guard import UrlPolicy, UrlPolicyError, safe_get
+
 
 @dataclass
 class RobotsPolicy:
@@ -30,6 +32,10 @@ class RobotsPolicy:
     default_delay: float = 1.0
     timeout: float = 10.0
     respect: bool = True
+    # robots.txt is fetched from the same untrusted host as the pages, so it
+    # goes through the same SSRF policy. Without this, /robots.txt would be an
+    # unguarded fetch of a customer-supplied URL.
+    policy: UrlPolicy | None = None
     _parsers: dict[str, urllib.robotparser.RobotFileParser | None] = field(
         default_factory=dict, repr=False
     )
@@ -68,12 +74,12 @@ class RobotsPolicy:
         robots_url = urljoin(f"{urlparse(url).scheme}://{host}", "/robots.txt")
         parser: urllib.robotparser.RobotFileParser | None = None
         try:
-            response = httpx.get(
-                robots_url,
+            with httpx.Client(
                 timeout=self.timeout,
                 headers={"User-Agent": self.user_agent},
-                follow_redirects=True,
-            )
+                follow_redirects=False,
+            ) as client:
+                response = safe_get(client, robots_url, self.policy or UrlPolicy())
             if response.status_code == 404:
                 parser = None  # No policy: unrestricted.
             elif response.is_success:
@@ -81,7 +87,9 @@ class RobotsPolicy:
                 parser.parse(response.text.splitlines())
             else:
                 self._unreachable.add(host)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, UrlPolicyError):
+            # A host whose robots.txt we cannot read is treated as disallowed
+            # by `can_fetch`, which is the safe default.
             self._unreachable.add(host)
 
         self._parsers[host] = parser

@@ -16,6 +16,7 @@ import httpx
 from geolytics.chunking.base import Document
 from geolytics.config import Settings, get_settings
 from geolytics.crawl.extract import extract_document
+from geolytics.crawl.guard import UrlPolicy, UrlPolicyError, safe_get, validate_url
 from geolytics.crawl.robots import RobotsPolicy
 
 _HREF_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -43,13 +44,16 @@ class CrawlStats:
     skipped_robots: int = 0
     skipped_type: int = 0
     skipped_duplicate: int = 0
+    skipped_policy: int = 0
     errors: list[tuple[str, str]] = field(default_factory=list)
+    policy_refusals: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"{self.fetched} fetched ({self.cached} from cache), "
             f"{self.skipped_duplicate} duplicate content, "
             f"{self.skipped_robots} disallowed by robots.txt, "
+            f"{self.skipped_policy} refused by URL policy, "
             f"{self.skipped_type} non-HTML, {len(self.errors)} errors"
         )
 
@@ -72,26 +76,38 @@ class Crawler:
         settings: Settings | None = None,
         cache_dir: str | Path | None = "data/cache",
         client: httpx.Client | None = None,
+        policy: UrlPolicy | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        self.policy = policy or UrlPolicy.from_settings(self.settings)
         self.robots = RobotsPolicy(
             user_agent=self.settings.crawl_user_agent,
             default_delay=self.settings.crawl_delay_seconds,
             respect=self.settings.crawl_respect_robots,
+            policy=self.policy,
         )
+        # Redirects are followed by `safe_get`, not by httpx: every hop is an
+        # attacker-controlled URL that has to be revalidated against the policy.
         self._client = client or httpx.Client(
             timeout=self.settings.crawl_timeout_seconds,
             headers={"User-Agent": self.settings.crawl_user_agent},
-            follow_redirects=True,
+            follow_redirects=False,
         )
         self.stats = CrawlStats()
 
     def crawl(self, start_url: str, max_pages: int | None = None) -> list[CrawlResult]:
+        """Crawl one host. Raises `UrlPolicyError` if the seed URL is refused.
+
+        A refused seed is a caller error worth surfacing -- the customer typed
+        a URL we will not fetch -- whereas a refused link found mid-crawl is
+        just skipped and counted.
+        """
         limit = max_pages or self.settings.crawl_max_pages
+        validate_url(start_url, self.policy)
         host = urlparse(start_url).netloc.lower()
 
         queue: deque[str] = deque([_canonical(start_url)])
@@ -103,6 +119,11 @@ class Crawler:
             url = queue.popleft()
             self.stats.requested += 1
 
+            # Policy first: a URL we will never fetch should be reported as a
+            # policy refusal, not mislabelled as a robots.txt block because
+            # fetching that host's robots.txt happened to be refused too.
+            if not self._allowed(url):
+                continue
             if not self.robots.can_fetch(url):
                 self.stats.skipped_robots += 1
                 continue
@@ -137,10 +158,22 @@ class Crawler:
         return results
 
     def fetch_one(self, url: str) -> CrawlResult | None:
+        if not self._allowed(url):
+            return None
         if not self.robots.can_fetch(url):
             self.stats.skipped_robots += 1
             return None
         return self._fetch(_canonical(url))
+
+    def _allowed(self, url: str) -> bool:
+        """Whether the URL policy permits this URL, recording a refusal if not."""
+        try:
+            validate_url(url, self.policy)
+        except UrlPolicyError as exc:
+            self.stats.skipped_policy += 1
+            self.stats.policy_refusals.append((url, exc.reason))
+            return False
+        return True
 
     def _fetch(self, url: str) -> CrawlResult | None:
         cached = self._read_cache(url)
@@ -159,7 +192,13 @@ class Crawler:
         time.sleep(self.robots.crawl_delay(url))
         started = time.perf_counter()
         try:
-            response = self._client.get(url)
+            response = safe_get(self._client, url, self.policy)
+        except UrlPolicyError as exc:
+            # Not an error the customer can fix by retrying: the URL is one we
+            # will never fetch. Recorded separately so an audit can explain why.
+            self.stats.skipped_policy += 1
+            self.stats.policy_refusals.append((url, exc.reason))
+            return None
         except httpx.HTTPError as exc:
             self.stats.errors.append((url, str(exc)))
             return None

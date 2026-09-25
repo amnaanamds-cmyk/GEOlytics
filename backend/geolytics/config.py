@@ -41,6 +41,28 @@ class Settings(BaseSettings):
     crawl_respect_robots: bool = True
     crawl_timeout_seconds: float = 30.0
 
+    # --- SSRF policy (see geolytics.crawl.guard) -------------------------
+    # The crawler fetches customer-supplied URLs from inside the production
+    # network. These two settings are the entire difference between a crawler
+    # and an open proxy into your own infrastructure.
+    #
+    # allow_private_addresses lets the crawler reach loopback, RFC1918 and
+    # link-local addresses -- including the cloud metadata endpoint. It exists
+    # for the test suite and for self-hosted installs auditing an intranet.
+    # It must stay False in any multi-tenant deployment.
+    crawl_allow_private_addresses: bool = False
+    # Restricting ports stops the crawler being used to probe internal
+    # services. Lifting the restriction takes a deliberate boolean rather than
+    # an empty or null list: "I cleared the list" must never silently mean
+    # "everything is allowed".
+    crawl_restrict_ports: bool = True
+    crawl_allowed_ports: list[int] = [80, 443, 8080, 8443]
+    # Narrow exemption from the address check, for a self-hosted install that
+    # must reach one known internal host. Safer than crawl_allow_private_addresses.
+    crawl_allowed_hosts: list[str] = []
+    crawl_blocked_hosts: list[str] = []
+    crawl_max_bytes: int = 5 * 1024 * 1024
+
     # LLM
     llm_backend: Literal["ollama", "none"] = "ollama"
     ollama_url: str = "http://localhost:11434"

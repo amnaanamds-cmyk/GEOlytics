@@ -46,6 +46,34 @@ def redis_available() -> bool:
     return _tcp_open("localhost", 6379)
 
 
+def make_test_settings(**overrides):
+    """Settings for tests that crawl the local fixture server.
+
+    The fixture site is served on 127.0.0.1 on an ephemeral port, which the
+    production SSRF policy refuses on both counts. Relaxing it lives here, in
+    one place, so no test quietly disables the protection on its own -- tests
+    that exercise the policy itself build their own `UrlPolicy`.
+    """
+    from geolytics.config import Settings
+
+    defaults = {
+        "env": "test",
+        "crawl_delay_seconds": 0.0,
+        "crawl_max_pages": 10,
+        "crawl_user_agent": "GEOlyticsBot/0.1 (+test)",
+        "crawl_respect_robots": True,
+        "crawl_allow_private_addresses": True,
+        "crawl_restrict_ports": False,
+        "postgres_dsn": POSTGRES_DSN,
+        "qdrant_url": QDRANT_URL,
+        "redis_url": REDIS_URL,
+        "embedding_backend": "hashing",
+        "embedding_dim": 128,
+        "llm_backend": "none",
+    }
+    return Settings(**{**defaults, **overrides})
+
+
 requires_qdrant = pytest.mark.skipif(not qdrant_available(), reason="qdrant not running")
 requires_postgres = pytest.mark.skipif(not postgres_available(), reason="postgres not running")
 requires_redis = pytest.mark.skipif(not redis_available(), reason="redis not running")

@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from services import make_test_settings
 
 from geolytics.chunking import SentenceChunker
 from geolytics.embedding.hashing import HashingEmbedder
@@ -77,10 +78,9 @@ def client(ollama_stub) -> OllamaClient:
 
 @pytest.fixture
 def documents(fixture_site):
-    from geolytics.config import Settings
     from geolytics.crawl.crawler import Crawler
 
-    settings = Settings(env="test", crawl_delay_seconds=0.0, crawl_max_pages=5)
+    settings = make_test_settings(crawl_max_pages=5)
     with Crawler(settings=settings, cache_dir=None) as crawler:
         return [r.document for r in crawler.crawl(f"{fixture_site}/index.html")]
 
